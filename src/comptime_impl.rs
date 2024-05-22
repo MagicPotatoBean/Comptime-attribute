@@ -13,6 +13,7 @@ use quote::{quote, ToTokens};
 use syn::{parse_macro_input, ItemFn};
 
 pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let mut cleanup_files: Vec<&str> = Vec::new();
     // Parse the input as `ItemFn` which is a type provided
     // by `syn` to represent a function.
     let input = parse_macro_input!(input as ItemFn);
@@ -34,12 +35,16 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     let disambiguator = hasher.finish();
 
     let comptime_rs = format!("comptime-{}.rs", disambiguator);
+    cleanup_files.push(&comptime_rs);
 
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&comptime_rs)
-        .expect("Failed to create comptime.rs")
+        .unwrap_or_else(|_| {
+            cleanup(&cleanup_files);
+            panic!("Failed to create {}", comptime_rs);
+        })
         .write_all(
             format!(
                 "fn main() {{ let result = {{{}}}; print!(\"{{}}\", quote::quote!(#result))   }}",
@@ -47,7 +52,10 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
             )
             .as_bytes(),
         )
-        .expect("Failed to write to comptime.rs");
+        .unwrap_or_else(|_| {
+            cleanup(&cleanup_files);
+            panic!("Failed to write to {}", comptime_rs);
+        });
 
     Command::new("rustfmt").arg(&comptime_rs).output().ok();
     let args: Vec<_> = std::env::args().collect();
@@ -70,13 +78,16 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     rustc_args.push("--crate-type".to_string());
     rustc_args.push("bin".to_string());
     rustc_args.push("--emit=dep-info,link".to_string());
-    rustc_args.append(&mut merge_externs(out_dir, &args));
+    rustc_args.append(&mut merge_externs(out_dir, &args, &cleanup_files));
     rustc_args.push(comptime_rs.clone());
 
     let compile_output = Command::new("rustc")
         .args(&rustc_args)
         .output()
-        .expect("could not invoke rustc");
+        .unwrap_or_else(|_| {
+            cleanup(&cleanup_files);
+            panic!("Failed to call rustc")
+        });
     if !compile_output.status.success() {
         panic!(
             "could not compile comptime expr:\n\n{}\n",
@@ -90,10 +101,15 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
         .and_then(|ef| ef.split('=').nth(1))
         .unwrap_or_default();
     let comptime_bin = out_dir.join(format!("comptime_bin{}", extra_filename));
+    cleanup_files.push(comptime_bin.to_str().unwrap_or_else(|| {
+        cleanup(&cleanup_files);
+        panic!("Could not parse binary name to &str")
+    }));
 
-    let comptime_output = Command::new(&comptime_bin)
-        .output()
-        .expect("could not invoke comptime_bin");
+    let comptime_output = Command::new(&comptime_bin).output().unwrap_or_else(|_| {
+        cleanup(&cleanup_files);
+        panic!("Failed to execute bin file")
+    });
 
     if !comptime_output.status.success() {
         panic!(
@@ -129,6 +145,17 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     )
     .into()
 }
+fn cleanup(files: &[&str]) {
+    let mut failed_files = Vec::<&str>::new();
+    for file in files {
+        if std::fs::remove_file(file).is_err() {
+            failed_files.push(file);
+        }
+    }
+    if !failed_files.is_empty() {
+        panic!("Failed to delete files: \n{:#?}", failed_files);
+    }
+}
 
 /// Line-for-line copy of the (comptime)[https://docs.rs/comptime/latest/comptime/] crate
 /// Returns the rustc args needed to build the comptime executable.
@@ -156,15 +183,25 @@ fn filter_rustc_args(args: &[String]) -> Vec<String> {
 }
 
 /// Line-for-line copy of the (comptime)[https://docs.rs/comptime/latest/comptime/] crate
-fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
+fn merge_externs(deps_dir: &Path, args: &[String], cleanup_files: &[&str]) -> Vec<String> {
     let mut cargo_rlibs = HashMap::new(); // libfoo -> /path/to/libfoo-12345.rlib
     let mut next_is_extern = false;
     for arg in args {
         if next_is_extern {
             let mut libname_path = arg.split('=');
-            let lib_name = libname_path.next().unwrap(); // libfoo
-            let path = Path::new(libname_path.next().unwrap());
-            if path.extension().unwrap() == "rlib" {
+            let lib_name = libname_path.next().unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Invalid cmd arguments")
+            }); // libfoo
+            let path = Path::new(libname_path.next().unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Failed to get the path of library");
+            }));
+            if path.extension().unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Failed to get the extension of {}", path.display())
+            }) == "rlib"
+            {
                 cargo_rlibs.insert(lib_name.to_string(), path.to_path_buf());
             }
         }
@@ -172,11 +209,27 @@ fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
     }
 
     let mut dep_dirents: Vec<_> = std::fs::read_dir(deps_dir)
-        .unwrap()
+        .unwrap_or_else(|_| {
+            cleanup(&cleanup_files);
+            panic!("Failed to read dependancies")
+        })
         .filter_map(|de| {
-            let de = de.unwrap();
+            let de = de.unwrap_or_else(|_| {
+                cleanup(cleanup_files);
+                panic!("Failed to read directory entry")
+            });
             let p = de.path();
-            let fname = p.file_name().unwrap().to_str().unwrap();
+            let fname = p
+                .file_name()
+                .unwrap_or_else(|| {
+                    cleanup(cleanup_files);
+                    panic!("Failed to get filename of library")
+                })
+                .to_str()
+                .unwrap_or_else(|| {
+                    cleanup(cleanup_files);
+                    panic!("Failed to cast filename to &str")
+                });
             if fname.starts_with("lib") && fname.ends_with(".rlib") {
                 Some(de)
             } else {
@@ -188,11 +241,28 @@ fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
 
     for dirent in dep_dirents {
         let path = dirent.path();
-        let fname = path.file_name().unwrap().to_str().unwrap();
+        let fname = path
+            .file_name()
+            .unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Failed to get filename of library")
+            })
+            .to_str()
+            .unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Failed to cast filename to &str")
+            });
         if !fname.ends_with(".rlib") {
             continue;
         }
-        let lib_name = fname.rsplit_once('-').unwrap().0.to_string();
+        let lib_name = fname
+            .rsplit_once('-')
+            .unwrap_or_else(|| {
+                cleanup(cleanup_files);
+                panic!("Lib name contained no \"-\"")
+            })
+            .0
+            .to_string();
         // ^ reverse "libfoo-disambiguator" then split off the disambiguator
         if let Entry::Vacant(ve) = cargo_rlibs.entry(lib_name) {
             ve.insert(path);
@@ -202,7 +272,11 @@ fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
     let mut merged_externs = Vec::with_capacity(cargo_rlibs.len() * 2);
     for (lib_name, path) in cargo_rlibs.iter() {
         merged_externs.push("--extern".to_string());
-        merged_externs.push(format!("{}={}", &lib_name.strip_prefix("lib").unwrap_or(lib_name), path.display()));
+        merged_externs.push(format!(
+            "{}={}",
+            &lib_name.strip_prefix("lib").unwrap_or(lib_name),
+            path.display()
+        ));
     }
 
     merged_externs
