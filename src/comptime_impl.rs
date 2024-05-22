@@ -124,7 +124,7 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     quote!(
         #(#attrs)*
         #vis #sig {
-            #(#result)*
+            #result
         }
     )
     .into()
