@@ -10,7 +10,7 @@ use std::{
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, Block, ItemFn};
+use syn::{parse_macro_input, ItemFn};
 
 pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     // Parse the input as `ItemFn` which is a type provided
@@ -35,7 +35,7 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
 
     let comptime_rs = format!("comptime-{}.rs", disambiguator);
 
-    let mut file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&comptime_rs)
@@ -43,7 +43,7 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
         .write_all(
             format!(
                 "fn main() {{ let result = {{{}}}; print!(\"{{}}\", quote::quote!(#result))   }}",
-                block.to_token_stream().to_string()
+                block.to_token_stream()
             )
             .as_bytes(),
         )
@@ -70,7 +70,7 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     rustc_args.push("--crate-type".to_string());
     rustc_args.push("bin".to_string());
     rustc_args.push("--emit=dep-info,link".to_string());
-    rustc_args.append(&mut merge_externs(&out_dir, &args));
+    rustc_args.append(&mut merge_externs(out_dir, &args));
     rustc_args.push(comptime_rs.clone());
 
     let compile_output = Command::new("rustc")
@@ -80,14 +80,14 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     if !compile_output.status.success() {
         panic!(
             "could not compile comptime expr:\n\n{}\n",
-            String::from_utf8(compile_output.stderr).unwrap()
+            String::from_utf8_lossy(&compile_output.stderr)
         );
     }
 
     let extra_filename = args
         .iter()
         .find(|a| a.starts_with("extra-filename="))
-        .map(|ef| ef.split('=').nth(1).unwrap())
+        .and_then(|ef| ef.split('=').nth(1))
         .unwrap_or_default();
     let comptime_bin = out_dir.join(format!("comptime_bin{}", extra_filename));
 
@@ -98,7 +98,7 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     if !comptime_output.status.success() {
         panic!(
             "could not run comptime expr:\n\n{}\n",
-            String::from_utf8(comptime_output.stderr).unwrap()
+            String::from_utf8_lossy(&comptime_output.stderr)
         );
     }
 
@@ -192,7 +192,7 @@ fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
         if !fname.ends_with(".rlib") {
             continue;
         }
-        let lib_name = fname.rsplitn(2, '-').nth(1).unwrap().to_string();
+        let lib_name = fname.rsplit_once('-').unwrap().0.to_string();
         // ^ reverse "libfoo-disambiguator" then split off the disambiguator
         if let Entry::Vacant(ve) = cargo_rlibs.entry(lib_name) {
             ve.insert(path);
