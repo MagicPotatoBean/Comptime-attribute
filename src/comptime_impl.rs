@@ -202,7 +202,7 @@ fn merge_externs(deps_dir: &Path, args: &[String]) -> Vec<String> {
     let mut merged_externs = Vec::with_capacity(cargo_rlibs.len() * 2);
     for (lib_name, path) in cargo_rlibs.iter() {
         merged_externs.push("--extern".to_string());
-        merged_externs.push(format!("{}={}", &lib_name["lib".len()..], path.display()));
+        merged_externs.push(format!("{}={}", &lib_name.strip_prefix("lib").unwrap_or(lib_name), path.display()));
     }
 
     merged_externs
