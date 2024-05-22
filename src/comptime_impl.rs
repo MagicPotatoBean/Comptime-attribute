@@ -33,8 +33,16 @@ pub fn comptime_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
     Instant::now().hash(&mut hasher);
     block.to_token_stream().to_string().hash(&mut hasher);
     let disambiguator = hasher.finish();
-
-    let comptime_rs = format!("comptime-{}.rs", disambiguator);
+    if let Err(err) = std::fs::create_dir("comptime") {
+        match err.kind() {
+            std::io::ErrorKind::AlreadyExists => {}
+            _ => {
+                cleanup(&cleanup_files);
+                panic!("Failed to create directory")
+            }
+        }
+    };
+    let comptime_rs = format!("comptime/comptime-{}.rs", disambiguator);
     cleanup_files.push(&comptime_rs);
 
     std::fs::OpenOptions::new()
